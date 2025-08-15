@@ -52,6 +52,7 @@ mongodb+srv://2200032294:RjzzMGmPkPmSdfUs@cluster0.pmu5a.mongodb.net/?retryWrite
 
 
 uvicorn app:app --host 0.0.0.0 --port 8080
+uvicorn main:app --host 0.0.0.0 --port 8080
 
 devtunnel host -p 8080 --allow-anonymous
 

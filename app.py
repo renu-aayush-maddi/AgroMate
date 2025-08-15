@@ -41,17 +41,39 @@ retriever_default = docsearch_default.as_retriever(search_type="similarity", sea
 llm_default = GoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.4, max_tokens=500)
 prompt_default = ChatPromptTemplate.from_messages([
     ("system", structured_system_prompt),
-    ("human", "{input}")
+    ("human", "{input}\n\nAdditional Info (if any): {location_info}")
 ])
 qa_chain_default = create_stuff_documents_chain(llm_default, prompt_default)
 rag_chain_default = create_retrieval_chain(retriever_default, qa_chain_default)
 
 class QuestionRequest(BaseModel):
     question: str
+    location: dict | None = None
+
+# @app.post("/answer")
+# async def run_query(body: QuestionRequest):
+#     if not body.question.strip():
+#         raise HTTPException(status_code=400, detail="Question is required")
+#     response = await asyncio.to_thread(rag_chain_default.invoke, {"input": body.question})
+#     return {"answer": response["answer"]}
 
 @app.post("/answer")
 async def run_query(body: QuestionRequest):
     if not body.question.strip():
         raise HTTPException(status_code=400, detail="Question is required")
-    response = await asyncio.to_thread(rag_chain_default.invoke, {"input": body.question})
+    
+    loc_str = ""
+    if body.location:
+        loc_str = f"User location: lat {body.location.get('lat')}, lon {body.location.get('lon')}"
+        print(loc_str)
+
+    response = await asyncio.to_thread(
+        rag_chain_default.invoke,
+        {
+            "input": body.question,
+            "location_info": loc_str
+        }
+    )
     return {"answer": response["answer"]}
+
+

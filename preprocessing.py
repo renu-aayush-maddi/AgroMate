@@ -59,8 +59,8 @@ PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 index_name = "test"
 
 # Document info
-doc_name = "NPOP"
-document_url = "https://agritech.tnau.ac.in/org_farm/pdf/NPOP%208th%20Edition%20.pdf"
+doc_name = "op"
+document_url = "https://transdev.assam.gov.in/sites/default/files/swf_utility_folder/departments/pndd_medhassu_in_oid_2/menu/document/compendium_of_govt._of_india_schemes_programmes.pdf"
 
 # Download PDF
 response = requests.get(document_url)
