@@ -15,5 +15,8 @@ export default defineConfig({
   optimizeDeps: {
     include: ['react', 'react-dom', 'react-router-dom'],
   },
+    server: {
+    host: true // 👈 This makes Vite show the "Network" link
+  }
 })
 

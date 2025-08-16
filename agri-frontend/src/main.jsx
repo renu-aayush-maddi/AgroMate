@@ -8,25 +8,26 @@
 //     <App />
 //   </StrictMode>,
 // )
+// e.g., src/main.jsx (your router entry)
+import "./i18n";
 import React, { useState } from 'react'
 import ReactDOM from 'react-dom/client'
 import { BrowserRouter, Routes, Route, Navigate, Link } from 'react-router-dom'
 import App from './pages/Chat.jsx'
 import Login from './pages/Login.jsx'
 import Signup from './pages/Signup.jsx'
+import Profile from './pages/Profile.jsx'
 import { AuthProvider, useAuth } from './state/AuthContext.jsx'
 
 function Nav() {
   const { token, logout } = useAuth()
   const [isMenuOpen, setIsMenuOpen] = useState(false)
-
   const toggleMenu = () => setIsMenuOpen(!isMenuOpen)
   const closeMenu = () => setIsMenuOpen(false)
 
   return (
     <nav style={styles.nav}>
       <div style={styles.container}>
-        {/* Logo/Brand Section */}
         <div style={styles.brand}>
           <Link to="/" style={styles.brandLink} onClick={closeMenu}>
             <span style={styles.logo}>🌾</span>
@@ -37,36 +38,27 @@ function Nav() {
           </Link>
         </div>
 
-        {/* Desktop Navigation */}
+        {/* Desktop */}
         <div style={styles.desktopNav}>
-          <Link to="/" style={styles.navLink}>
-            <span style={styles.navIcon}>💬</span>
-            Chat
-          </Link>
-          
+          <Link to="/" style={styles.navLink}>💬 Chat</Link>
+          <Link to="/profile" style={styles.navLink}>👤 Profile</Link>
+
           {token ? (
             <div style={styles.userSection}>
               <span style={styles.welcomeText}>Welcome, Farmer!</span>
               <button onClick={logout} style={styles.logoutBtn}>
-                <span style={styles.btnIcon}>🚪</span>
-                Logout
+                <span style={styles.btnIcon}>🚪</span> Logout
               </button>
             </div>
           ) : (
             <div style={styles.authLinks}>
-              <Link to="/login" style={styles.authLink}>
-                <span style={styles.navIcon}>🔑</span>
-                Login
-              </Link>
-              <Link to="/signup" style={styles.signupBtn}>
-                <span style={styles.btnIcon}>🌱</span>
-                Join Farm
-              </Link>
+              <Link to="/login" style={styles.authLink}>🔑 Login</Link>
+              <Link to="/signup" style={styles.signupBtn}>🌱 Join Farm</Link>
             </div>
           )}
         </div>
 
-        {/* Mobile Menu Button */}
+        {/* Mobile trigger */}
         <button style={styles.mobileMenuBtn} onClick={toggleMenu}>
           <span style={isMenuOpen ? styles.hamburgerOpen : styles.hamburger}>
             {isMenuOpen ? '✕' : '☰'}
@@ -74,7 +66,7 @@ function Nav() {
         </button>
       </div>
 
-      {/* Mobile Menu Overlay */}
+      {/* Mobile menu */}
       {isMenuOpen && (
         <div style={styles.mobileOverlay} onClick={closeMenu}>
           <div style={styles.mobileMenu} onClick={(e) => e.stopPropagation()}>
@@ -82,42 +74,34 @@ function Nav() {
               <span style={styles.mobileTitle}>Navigation</span>
               <button style={styles.closeBtn} onClick={closeMenu}>✕</button>
             </div>
-            
+
             <div style={styles.mobileLinks}>
               <Link to="/" style={styles.mobileLink} onClick={closeMenu}>
-                <span style={styles.navIcon}>💬</span>
-                <span>Chat with AI</span>
-                <span style={styles.arrow}>→</span>
+                <span>💬</span><span>Chat with AI</span><span style={styles.arrow}>→</span>
               </Link>
-              
+              <Link to="/profile" style={styles.mobileLink} onClick={closeMenu}>
+                <span>👤</span><span>Profile</span><span style={styles.arrow}>→</span>
+              </Link>
+
               {token ? (
                 <>
                   <div style={styles.mobileUserInfo}>
                     <span style={styles.mobileWelcome}>👨‍🌾 Welcome, Farmer!</span>
                   </div>
-                  <button onClick={() => {logout(); closeMenu();}} style={styles.mobileLogoutBtn}>
-                    <span style={styles.navIcon}>🚪</span>
-                    <span>Logout</span>
+                  <button onClick={() => { logout(); closeMenu(); }} style={styles.mobileLogoutBtn}>
+                    <span>🚪</span><span>Logout</span>
                   </button>
                 </>
               ) : (
                 <>
                   <Link to="/login" style={styles.mobileLink} onClick={closeMenu}>
-                    <span style={styles.navIcon}>🔑</span>
-                    <span>Login</span>
-                    <span style={styles.arrow}>→</span>
+                    <span>🔑</span><span>Login</span><span style={styles.arrow}>→</span>
                   </Link>
                   <Link to="/signup" style={styles.mobileSignupLink} onClick={closeMenu}>
-                    <span style={styles.navIcon}>🌱</span>
-                    <span>Join the Farm</span>
-                    <span style={styles.arrow}>→</span>
+                    <span>🌱</span><span>Join the Farm</span><span style={styles.arrow}>→</span>
                   </Link>
                 </>
               )}
-            </div>
-            
-            <div style={styles.mobileFooter}>
-              <p style={styles.footerText}>🇮🇳 Built for Indian Farmers</p>
             </div>
           </div>
         </div>
@@ -133,14 +117,17 @@ function Root() {
         <Nav />
         <Routes>
           <Route path="/" element={<App />} />
+          <Route path="/profile" element={<Profile />} />
           <Route path="/login" element={<Login />} />
           <Route path="/signup" element={<Signup />} />
+          <Route path="/profile" element={<Profile />} />
           <Route path="*" element={<Navigate to="/" />} />
         </Routes>
       </BrowserRouter>
     </AuthProvider>
   )
 }
+
 
 const styles = {
   nav: {

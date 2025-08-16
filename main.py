@@ -252,6 +252,9 @@ from db_mongo import get_db, close_db
 from models_mongo import USERS_COLL, PROFILES_COLL, SESSIONS_COLL, user_doc, profile_doc, session_context_doc
 from schemas import SignupRequest, LoginRequest, TokenResponse, FarmerProfileRequest, FarmerProfileResponse, QuestionRequest
 from auth import hash_password, verify_password, create_access_token, get_current_user
+from services.agent_service import create_agent_prompt, extract_api_calls, execute_api_calls, format_api_results_for_llm
+from services.dynamic_api_tool import dynamic_api_call
+from schemas import AgentQuestionRequest  # Add to your existing schema imports
 
 # LangChain / RAG
 from langchain_google_genai import GoogleGenerativeAI
@@ -262,6 +265,7 @@ from langchain_pinecone import PineconeVectorStore
 from pinecone import Pinecone
 from src.prompt import structured_system_prompt
 from src.helper import download_hugging_face_embeddings
+from langchain_openai import ChatOpenAI
 
 load_dotenv()
 
@@ -292,7 +296,7 @@ docsearch_default = PineconeVectorStore.from_existing_index(index_name=index_nam
 retriever_default = docsearch_default.as_retriever(search_type="similarity", search_kwargs={"k": 3})
 
 # LLM setup
-llm_default = GoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.4, max_tokens=500)
+llm_default = GoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.1, max_tokens=800)
 prompt_default = ChatPromptTemplate.from_messages([
     ("system", structured_system_prompt + "\n\n"
      "Use the provided farmer profile and session context when available.\n"
@@ -303,8 +307,25 @@ prompt_default = ChatPromptTemplate.from_messages([
      "Always include a normal answer; optionally include a single-line JSON after 'SESSION_UPDATE:' to persist context."),
     ("human", "{input}\n\nFarmer Profile: {farmer_profile}\nSession Context: {session_context}\nAdditional Info: {location_info}")
 ])
-qa_chain_default = create_stuff_documents_chain(llm_default, prompt_default)
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+llm_router = ChatOpenAI(openai_api_key=OPENAI_API_KEY, model="gpt-4o-mini")
+qa_chain_default = create_stuff_documents_chain(llm_router, prompt_default)
 rag_chain_default = create_retrieval_chain(retriever_default, qa_chain_default)
+
+
+# Add this new agent-enhanced LLM setup (after your existing LLM setup)
+agent_prompt_default = ChatPromptTemplate.from_messages([
+    ("system", create_agent_prompt(structured_system_prompt) + "\n\n"
+     "Use the provided farmer profile and session context when available.\n"
+     "If you need real-time data (weather, prices, soil info), use API_CALL format.\n"
+     "After getting API results, provide a comprehensive answer combining real-time data with your knowledge.\n"
+     "Always state data sources and timestamps in your final response.\n"
+     "Always include a normal answer; optionally include SESSION_UPDATE for context persistence."),
+    ("human", "{input}\n\nFarmer Profile: {farmer_profile}\nSession Context: {session_context}\nAdditional Info: {location_info}\n{api_results}")
+])
+
+agent_qa_chain = create_stuff_documents_chain(llm_router, agent_prompt_default)
+agent_rag_chain = create_retrieval_chain(retriever_default, agent_qa_chain)
 
 # Helpers
 def serialize_profile(profile: Optional[dict]) -> str:
@@ -330,27 +351,34 @@ async def update_session_context(db, session_id: str, updates: dict):
         },
         upsert=True
     )
-
+def serialize_profile(profile: Optional[dict]) -> str:
+    if not profile:
+        return "None"
+    cleaned = {
+        k: v
+        for k, v in profile.items()
+        if k not in ("_id", "user_id", "updated_at", "created_at")
+    }
+    return json.dumps(cleaned, ensure_ascii=False)
 def extract_answer(resp) -> str:
-    # Try common keys first
+    """Extract the actual LLM response from LangChain output"""
+    
     if isinstance(resp, dict):
-        for key in ["answer", "output_text", "result", "output"]:
-            val = resp.get(key)
-            if isinstance(val, str) and val.strip():
-                return val.strip()
-        # Sometimes LC returns {"answer": "", "context": ...} but has 'generations' or 'text'
-        for key in ["text", "message", "content"]:
-            val = resp.get(key)
-            if isinstance(val, str) and val.strip():
-                return val.strip()
-    # Fallback to string conversion
-    try:
-        text = str(resp)
-        if text and text.strip():
-            return text.strip()
-    except Exception:
-        pass
-    return ""
+        # LangChain retrieval chain returns answer in 'answer' key
+        if 'answer' in resp:
+            answer = resp['answer']
+            if isinstance(answer, str) and answer.strip():
+                return answer.strip()
+            elif answer == "":
+                return "I couldn't find a specific answer. Please provide more details about your crops and location."
+        
+        # Try other possible keys
+        for key in ["output_text", "result", "text", "content"]:
+            if key in resp and isinstance(resp[key], str) and resp[key].strip():
+                return resp[key].strip()
+    
+    # If we get here, something is wrong
+    return "I'm having trouble processing your question. Please try again."
 
 def safe_parse_session_update(answer_text: str) -> dict:
     """
@@ -439,6 +467,253 @@ async def upsert_profile(body: FarmerProfileRequest, user=Depends(get_current_us
     )
 
 # Q&A route
+
+# main.py - ADD THIS FUNCTION FIRST
+
+async def classify_intent_with_llm(question: str, user_location: dict = None) -> str:
+    """Use LLM to classify user intent as 'rag' or 'agent'"""
+    
+    location_context = ""
+    if user_location and user_location.get('lat') and user_location.get('lon'):
+        location_context = f"User has location: lat {user_location['lat']}, lon {user_location['lon']}"
+    else:
+        location_context = "No location provided"
+    
+    classification_prompt = f"""
+Classify this agricultural question as either 'rag' or 'agent':
+
+- 'rag': Question can be answered with general agricultural knowledge/best practices
+- 'agent': Question needs real-time data (weather, market prices, current conditions)
+
+Question: "{question}"
+{location_context}
+
+Examples:
+"What are symptoms of nitrogen deficiency?" → rag
+"Should I water my crops today?" → agent  
+"How to prepare soil for planting?" → rag
+"Will it rain tomorrow?" → agent
+"Benefits of crop rotation" → rag
+"Current wheat prices" → agent
+"When should I harvest?" → agent
+"Types of fertilizers" → rag
+
+Respond with only: rag OR agent
+"""
+
+    try:
+        response = await asyncio.to_thread(
+            llm_default.invoke,
+            classification_prompt
+        )
+        
+        intent = response.strip().lower()
+        if intent in ['rag', 'agent']:
+            return intent
+        else:
+            # Fallback if LLM gives unexpected response
+            print(f"⚠️ Unexpected LLM classification response: {response}")
+            return 'rag'
+            
+    except Exception as e:
+        print(f"❌ Intent classification failed: {e}")
+        # Fallback to RAG mode if classification fails
+        return 'rag'
+
+# main.py - ADD THIS UNIFIED ENDPOINT
+
+
+@app.post("/ask")
+async def unified_agricultural_assistant(body: QuestionRequest, request: Request, db=Depends(get_db)):
+    """Unified endpoint that uses LLM to classify intent and route appropriately"""
+    print(f"🧠 UNIFIED ASK ENDPOINT CALLED")
+    print(f"📝 Question: {body.question}")
+    
+    # Auth logic (same as both your routes)
+    auth_header = request.headers.get("Authorization")
+    authed_email = None
+    if auth_header and auth_header.lower().startswith("bearer "):
+        token = auth_header.split(" ", 1)[1]
+        from auth import JWT_SECRET, JWT_ALG
+        import jwt
+        try:
+            payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
+            authed_email = payload.get("sub")
+            user = await db[USERS_COLL].find_one({"email": authed_email})
+            if not user:
+                authed_email = None
+        except Exception:
+            authed_email = None
+
+    if not body.question or not body.question.strip():
+        raise HTTPException(status_code=400, detail="Question is required")
+
+    # Profile logic (same as both routes)
+    farmer_profile = "None"
+    if authed_email:
+        prof = await db[PROFILES_COLL].find_one({"user_id": authed_email})
+        farmer_profile = serialize_profile(prof)
+        print("Farmer profile for user:", authed_email, "->", farmer_profile)
+
+    # Location processing (combined from both routes)
+    loc_str = ""
+    user_location = {}
+    if body.location:
+        lat = body.location.get("lat")
+        lon = body.location.get("lon")
+        if lat and lon:
+            loc_str = f"User location: lat {lat}, lon {lon}"
+            user_location = {"lat": lat, "lon": lon}
+            print(f"📍 Location found: {user_location}")
+        else:
+            loc_str = f"User location: {json.dumps(body.location)}"
+            print(f"📍 Location (partial): {loc_str}")
+    else:
+        print("📍 No location provided")
+
+    # Session context handling (same as both routes)
+    session_ctx_json = "{}"
+    session_id = body.session_id or request.headers.get("X-Session-Id")
+    if authed_email:
+        if session_id:
+            sc = await get_or_create_session_context(db, session_id)
+            session_ctx_json = json.dumps(sc.get("data") or {})
+    else:
+        if not session_id:
+            session_id = os.urandom(8).hex()
+        sc = await get_or_create_session_context(db, session_id)
+        session_ctx_json = json.dumps(sc.get("data") or {})
+
+    print(f"🎯 Session ID: {session_id}")
+
+    # LLM-BASED INTENT CLASSIFICATION
+    print("🤖 Classifying intent with LLM...")
+    intent = await classify_intent_with_llm(body.question, user_location)
+    print(f"🎯 LLM CLASSIFIED INTENT: {intent.upper()}")
+    
+    try:
+        if intent == 'agent':
+            print(f"🤖 EXECUTING: Agent mode (real-time data needed)")
+            
+            # AGENT MODE LOGIC (from your agent route)
+            print("🔄 Step 1: Getting initial LLM response...")
+            initial_response = await asyncio.to_thread(
+                agent_rag_chain.invoke,
+                {
+                    "input": body.question,
+                    "farmer_profile": farmer_profile,
+                    "session_context": session_ctx_json,
+                    "location_info": loc_str,
+                    "api_results": ""
+                }
+            )
+
+            initial_answer = extract_answer(initial_response)
+            print(f"🔍 Initial LLM response: {initial_answer[:200]}...")
+
+            # Step 2: Extract API calls
+            api_calls = extract_api_calls(initial_answer)
+            print(f"📞 API calls requested: {len(api_calls)}")
+            for i, call in enumerate(api_calls):
+                print(f"  API {i+1}: {call.get('description', 'No description')}")
+                print(f"  URL: {call.get('url', 'No URL')[:100]}...")
+
+            if api_calls:
+                print("🔧 Processing and validating API calls...")
+                from services.agent_service import validate_and_fix_api_calls
+                valid_calls = validate_and_fix_api_calls(api_calls, user_location)
+
+                if valid_calls:
+                    print(f"🚀 Executing {len(valid_calls)} valid API calls...")
+                    api_results = execute_api_calls(valid_calls)
+                    print(f"✅ API calls executed. Sources: {api_results.get('sources', [])}")
+
+                    # Step 3: Get final response with API data
+                    print("🔄 Step 3: Getting final LLM response with API data...")
+                    final_response = await asyncio.to_thread(
+                        agent_rag_chain.invoke,
+                        {
+                            "input": body.question,
+                            "farmer_profile": farmer_profile,
+                            "session_context": session_ctx_json,
+                            "location_info": loc_str,
+                            "api_results": format_api_results_for_llm(api_results)
+                        }
+                    )
+                    answer_text = extract_answer(final_response)
+                    sources = api_results.get("sources", [])
+                    print(f"🎯 Final answer with API data: {answer_text[:200]}...")
+                else:
+                    print("❌ No valid API calls could be generated or fixed")
+                    answer_text = initial_answer
+                    sources = []
+            else:
+                print("⚠️ No API calls were made by the LLM")
+                answer_text = initial_answer
+                sources = []
+            
+            # Prepare agent response
+            response_data = {
+                "answer": answer_text,
+                "session_id": session_id,
+                "intent": "agent",
+                "reasoning": "LLM determined real-time data needed"
+            }
+            if sources:
+                response_data["sources"] = sources
+                response_data["agent_mode"] = True
+
+        else:  # intent == 'rag'
+            print(f"📚 EXECUTING: RAG mode (knowledge base sufficient)")
+            
+            # RAG MODE LOGIC (from your answer route)
+            response = await asyncio.to_thread(
+                rag_chain_default.invoke,
+                {
+                    "input": body.question,
+                    "farmer_profile": farmer_profile,
+                    "session_context": session_ctx_json,
+                    "location_info": loc_str
+                }
+            )
+
+            answer_text = extract_answer(response)
+            
+            # Prepare RAG response
+            response_data = {
+                "answer": answer_text,
+                "session_id": session_id,
+                "intent": "rag",
+                "reasoning": "LLM determined knowledge base sufficient"
+            }
+
+    except Exception as e:
+        print(f"❌ LLM processing error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"LLM processing failed: {str(e)}")
+
+    # Fallback logic (same as both routes)
+    if not response_data["answer"].strip():
+        print("⚠️ Empty answer, using fallback")
+        response_data["answer"] = (
+            "I could not find specific references right now. "
+            "I can still help with best-practice guidance. "
+            "Please share crop, growth stage, soil type, and irrigation method if available."
+        )
+
+    # Session update logic (same as both routes)
+    new_ctx = safe_parse_session_update(response_data["answer"])
+    if not new_ctx and 'response' in locals():
+        new_ctx = safe_parse_session_update(str(response))
+
+    if session_id and new_ctx:
+        await update_session_context(db, session_id, new_ctx)
+
+    print(f"✅ UNIFIED RESPONSE ({intent.upper()}): {json.dumps(response_data, indent=2)}")
+    return JSONResponse(content=response_data)
+
+
 @app.post("/answer")
 async def run_query(body: QuestionRequest, request: Request, db=Depends(get_db)):
     # Optional auth parse
@@ -465,12 +740,14 @@ async def run_query(body: QuestionRequest, request: Request, db=Depends(get_db))
     if authed_email:
         prof = await db[PROFILES_COLL].find_one({"user_id": authed_email})
         farmer_profile = serialize_profile(prof)
+        print("Farmer profile for user:", authed_email, "->", farmer_profile)
 
     loc_str = ""
     if body.location:
         lat = body.location.get("lat")
         lon = body.location.get("lon")
         loc_str = f"User location: lat {lat}, lon {lon}"
+        print("User location string:", loc_str)
 
     # Session context handling
     session_ctx_json = "{}"
@@ -528,3 +805,497 @@ async def run_query(body: QuestionRequest, request: Request, db=Depends(get_db))
         await update_session_context(db, session_id, new_ctx)
 
     return JSONResponse(content={"answer": answer_text, "session_id": session_id})
+
+
+
+@app.post("/agent")
+async def run_agent_query(body: AgentQuestionRequest, request: Request, db=Depends(get_db)):
+    print(f"🚀 AGENT ENDPOINT CALLED")
+    print(f"📝 Request body: {body}")
+    
+    # (User authentication, profile, location processing as in your original code)
+    # ...
+    session_ctx_json = "{}"
+    session_id = body.session_id or request.headers.get("X-Session-Id")
+    authed_email = None
+    # ... (auth code omitted for brevity)
+    farmer_profile = "None"
+    # ... (profile retrieval code omitted)
+    loc_str = ""
+    user_location = {}
+    if body.location:
+        lat = body.location.get("lat")
+        lon = body.location.get("lon")
+        if lat and lon:
+            loc_str = f"User location: lat {lat}, lon {lon}"
+            user_location = {"lat": lat, "lon": lon}
+            print(f"📍 Location found: {user_location}")
+        elif body.location:
+            loc_str = f"User location: {json.dumps(body.location)}"
+            print(f"📍 Location (no lat/lon): {loc_str}")
+    else:
+        print("📍 No location provided")
+
+    print(f"🎯 Session ID: {session_id}")
+
+    try:
+        if body.enable_agent:
+            print(f"🤖 AGENT MODE: Processing question: {body.question}")
+            print(f"📍 Location: {user_location}")
+
+            # Step 1: Get initial response with potential API calls
+            print("🔄 Step 1: Getting initial LLM response...")
+            initial_response = await asyncio.to_thread(
+                agent_rag_chain.invoke,
+                {
+                    "input": body.question,
+                    "farmer_profile": farmer_profile,
+                    "session_context": session_ctx_json,
+                    "location_info": loc_str,
+                    "api_results": ""
+                }
+            )
+
+            initial_answer = extract_answer(initial_response)
+            print(f"🔍 Initial LLM response: {initial_answer[:200]}...")
+
+            # Step 2: Extract API calls
+            api_calls = extract_api_calls(initial_answer)
+            print(f"📞 API calls requested: {len(api_calls)}")
+            for i, call in enumerate(api_calls):
+                print(f"  API {i+1}: {call.get('description', 'No description')}")
+                print(f"  URL: {call.get('url', 'No URL')[:100]}...")
+
+            if api_calls:
+                print("🔧 Processing and validating API calls...")
+                from services.agent_service import validate_and_fix_api_calls
+                valid_calls = validate_and_fix_api_calls(api_calls, user_location)
+
+                if valid_calls:
+                    print(f"🚀 Executing {len(valid_calls)} valid API calls...")
+                    api_results = execute_api_calls(valid_calls)
+                    print(f"✅ API calls executed. Sources: {api_results.get('sources', [])}")
+
+                    # Step 3: Get final response with API data
+                    print("🔄 Step 3: Getting final LLM response with API data...")
+                    final_response = await asyncio.to_thread(
+                        agent_rag_chain.invoke,
+                        {
+                            "input": body.question,
+                            "farmer_profile": farmer_profile,
+                            "session_context": session_ctx_json,
+                            "location_info": loc_str,
+                            "api_results": format_api_results_for_llm(api_results)
+                        }
+                    )
+                    answer_text = extract_answer(final_response)
+                    sources = api_results.get("sources", [])
+                    print(f"🎯 Final answer with API data: {answer_text[:200]}...")
+                else:
+                    print("❌ No valid API calls could be generated or fixed")
+                    answer_text = initial_answer
+                    sources = []
+            else:
+                print("⚠️ No API calls were made by the LLM")
+                answer_text = initial_answer
+                sources = []
+        else:
+            # Regular RAG mode
+            print("📚 REGULAR RAG MODE")
+            response = await asyncio.to_thread(
+                rag_chain_default.invoke,
+                {
+                    "input": body.question,
+                    "farmer_profile": farmer_profile,
+                    "session_context": session_ctx_json,
+                    "location_info": loc_str
+                }
+            )
+            answer_text = extract_answer(response)
+            sources = []
+
+    except Exception as e:
+        print(f"❌ LLM processing error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"LLM processing failed: {str(e)}")
+
+    # Fallback logic (unchanged)
+    if not answer_text.strip():
+        print("⚠️ Empty answer, using fallback")
+        answer_text = (
+            "I could not find specific references right now. "
+            "I can still help with best-practice guidance."
+            "Please share crop, growth stage, soil type, and irrigation method if available."
+        )
+
+    # Session update logic (unchanged)
+    new_ctx = safe_parse_session_update(answer_text)
+    if session_id and new_ctx:
+        await update_session_context(db, session_id, new_ctx)
+
+    # Prepare agent response
+    response_data = {
+        "answer": answer_text,
+        "session_id": session_id
+    }
+    if body.enable_agent and sources:
+        response_data["sources"] = sources
+        response_data["agent_mode"] = True
+
+    print(f"✅ AGENT RESPONSE: {json.dumps(response_data, indent=2)}")
+    return JSONResponse(content=response_data)
+
+
+
+
+
+# # Add new agent endpoint
+# @app.post("/agent")
+# async def run_agent_query(body: AgentQuestionRequest, request: Request, db=Depends(get_db)):
+#     # Reuse your existing auth logic
+#     auth_header = request.headers.get("Authorization")
+#     authed_email = None
+#     if auth_header and auth_header.lower().startswith("bearer "):
+#         token = auth_header.split(" ", 1)[1]
+#         from auth import JWT_SECRET, JWT_ALG
+#         import jwt
+#         try:
+#             payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
+#             authed_email = payload.get("sub")
+#             user = await db[USERS_COLL].find_one({"email": authed_email})
+#             if not user:
+#                 authed_email = None
+#         except Exception:
+#             authed_email = None
+
+#     if not body.question or not body.question.strip():
+#         raise HTTPException(status_code=400, detail="Question is required")
+
+#     # Reuse your existing profile logic
+#     farmer_profile = "None"
+#     if authed_email:
+#         prof = await db[PROFILES_COLL].find_one({"user_id": authed_email})
+#         farmer_profile = serialize_profile(prof)
+
+#     # Enhanced location string with lat/lon for APIs
+#     loc_str = ""
+#     user_location = {}
+#     if body.location:
+#         lat = body.location.get("lat")
+#         lon = body.location.get("lon")
+#         if lat and lon:
+#             loc_str = f"User location: lat {lat}, lon {lon}"
+#             user_location = {"lat": lat, "lon": lon}
+#         elif body.location:
+#             loc_str = f"User location: {json.dumps(body.location)}"
+
+#     # Reuse your existing session context logic
+#     session_ctx_json = "{}"
+#     session_id = body.session_id or request.headers.get("X-Session-Id")
+#     if authed_email:
+#         if session_id:
+#             sc = await get_or_create_session_context(db, session_id)
+#             session_ctx_json = json.dumps(sc.get("data") or {})
+#     else:
+#         if not session_id:
+#             session_id = os.urandom(8).hex()
+#         sc = await get_or_create_session_context(db, session_id)
+#         session_ctx_json = json.dumps(sc.get("data") or {})
+
+#     try:
+#         if body.enable_agent:
+#             # AGENT MODE: Two-step process
+            
+#             # Step 1: Get initial response with potential API calls
+#             initial_response = await asyncio.to_thread(
+#                 agent_rag_chain.invoke,
+#                 {
+#                     "input": body.question,
+#                     "farmer_profile": farmer_profile,
+#                     "session_context": session_ctx_json,
+#                     "location_info": loc_str,
+#                     "api_results": ""
+#                 }
+#             )
+            
+#             initial_answer = extract_answer(initial_response)
+            
+#             # Step 2: Check if LLM wants to make API calls
+#             api_calls = extract_api_calls(initial_answer)
+            
+#             if api_calls:
+#                 # Fill in location data for API calls that need it
+#                 for call in api_calls:
+#                     url = call.get('url', '')
+#                     if '{lat}' in url and '{lon}' in url and user_location:
+#                         call['url'] = url.format(lat=user_location['lat'], lon=user_location['lon'])
+#                     elif '{lat}' in url or '{lon}' in url:
+#                         # Skip API calls that need location but don't have it
+#                         call['url'] = ''
+                
+#                 # Execute API calls
+#                 api_results = execute_api_calls([c for c in api_calls if c.get('url')])
+                
+#                 # Step 3: Get final response with API data
+#                 final_response = await asyncio.to_thread(
+#                     agent_rag_chain.invoke,
+#                     {
+#                         "input": body.question,
+#                         "farmer_profile": farmer_profile,
+#                         "session_context": session_ctx_json,
+#                         "location_info": loc_str,
+#                         "api_results": format_api_results_for_llm(api_results)
+#                     }
+#                 )
+                
+#                 answer_text = extract_answer(final_response)
+#                 sources = api_results.get("sources", [])
+                
+#             else:
+#                 # No API calls needed, use initial response
+#                 answer_text = initial_answer
+#                 sources = []
+            
+#         else:
+#             # REGULAR RAG MODE (your existing logic)
+#             response = await asyncio.to_thread(
+#                 rag_chain_default.invoke,
+#                 {
+#                     "input": body.question,
+#                     "farmer_profile": farmer_profile,
+#                     "session_context": session_ctx_json,
+#                     "location_info": loc_str
+#                 }
+#             )
+#             answer_text = extract_answer(response)
+#             sources = []
+
+#     except Exception as e:
+#         raise HTTPException(status_code=500, detail="LLM processing failed")
+
+#     # Reuse your existing fallback and session update logic
+#     if not answer_text.strip():
+#         session_data_candidate = safe_parse_session_update(str(response))
+#         if session_data_candidate:
+#             answer_text = "Noted. I've saved these details. How else can I help?"
+#         else:
+#             answer_text = (
+#                 "I could not find specific references right now. "
+#                 "I can still help with best-practice guidance. "
+#                 "Please share crop, growth stage, soil type, and irrigation method if available."
+#             )
+
+#     # Parse SESSION_UPDATE for context persistence
+#     new_ctx = safe_parse_session_update(answer_text)
+#     if not new_ctx and 'response' in locals():
+#         new_ctx = safe_parse_session_update(str(response))
+
+#     if session_id and new_ctx:
+#         await update_session_context(db, session_id, new_ctx)
+
+#     response_data = {
+#         "answer": answer_text, 
+#         "session_id": session_id
+#     }
+    
+#     if body.enable_agent and sources:
+#         response_data["sources"] = sources
+#         response_data["agent_mode"] = True
+
+#     return JSONResponse(content=response_data)
+# main.py - Enhanced with full debug logging
+# @app.post("/agent")
+# async def run_agent_query(body: AgentQuestionRequest, request: Request, db=Depends(get_db)):
+#     print(f"🚀 AGENT ENDPOINT CALLED")
+#     print(f"📝 Request body: {body}")
+    
+#     # Existing auth logic
+#     auth_header = request.headers.get("Authorization")
+#     authed_email = None
+#     if auth_header and auth_header.lower().startswith("bearer "):
+#         token = auth_header.split(" ", 1)[1]
+#         from auth import JWT_SECRET, JWT_ALG
+#         import jwt
+#         try:
+#             payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
+#             authed_email = payload.get("sub")
+#             user = await db[USERS_COLL].find_one({"email": authed_email})
+#             if not user:
+#                 authed_email = None
+#         except Exception as e:
+#             print(f"🔐 Auth error: {e}")
+#             authed_email = None
+
+#     if not body.question or not body.question.strip():
+#         print("❌ ERROR: Empty question")
+#         raise HTTPException(status_code=400, detail="Question is required")
+
+#     # Profile logic
+#     farmer_profile = "None"
+#     if authed_email:
+#         prof = await db[PROFILES_COLL].find_one({"user_id": authed_email})
+#         farmer_profile = serialize_profile(prof)
+#         print(f"👤 User profile: {farmer_profile}")
+
+#     # Location processing
+#     loc_str = ""
+#     user_location = {}
+#     if body.location:
+#         lat = body.location.get("lat")
+#         lon = body.location.get("lon")
+#         if lat and lon:
+#             loc_str = f"User location: lat {lat}, lon {lon}"
+#             user_location = {"lat": lat, "lon": lon}
+#             print(f"📍 Location found: {user_location}")
+#         elif body.location:
+#             loc_str = f"User location: {json.dumps(body.location)}"
+#             print(f"📍 Location (no lat/lon): {loc_str}")
+#     else:
+#         print("📍 No location provided")
+
+#     # Session context logic
+#     session_ctx_json = "{}"
+#     session_id = body.session_id or request.headers.get("X-Session-Id")
+#     if authed_email:
+#         if session_id:
+#             sc = await get_or_create_session_context(db, session_id)
+#             session_ctx_json = json.dumps(sc.get("data") or {})
+#     else:
+#         if not session_id:
+#             session_id = os.urandom(8).hex()
+#         sc = await get_or_create_session_context(db, session_id)
+#         session_ctx_json = json.dumps(sc.get("data") or {})
+
+#     print(f"🎯 Session ID: {session_id}")
+
+#     try:
+#         if body.enable_agent:
+#             print(f"🤖 AGENT MODE: Processing question: {body.question}")
+#             print(f"📍 Location: {user_location}")
+            
+#             # Step 1: Get initial response with potential API calls
+#             print("🔄 Step 1: Getting initial LLM response...")
+#             initial_response = await asyncio.to_thread(
+#                 agent_rag_chain.invoke,
+#                 {
+#                     "input": body.question,
+#                     "farmer_profile": farmer_profile,
+#                     "session_context": session_ctx_json,
+#                     "location_info": loc_str,
+#                     "api_results": ""
+#                 }
+#             )
+            
+#             initial_answer = extract_answer(initial_response)
+#             print(f"🔍 Initial LLM response: {initial_answer[:200]}...")
+            
+#             # Step 2: Check if LLM wants to make API calls
+#             api_calls = extract_api_calls(initial_answer)
+#             print(f"📞 API calls requested: {len(api_calls)}")
+#             for i, call in enumerate(api_calls):
+#                 print(f"  API {i+1}: {call.get('description', 'No description')}")
+#                 print(f"  URL: {call.get('url', 'No URL')[:100]}...")
+            
+#             if api_calls:
+#                 print("🔧 Processing API calls...")
+#                 # Fill in location data for API calls that need it
+#                 for call in api_calls:
+#                     url = call.get('url', '')
+#                     if '{lat}' in url and '{lon}' in url and user_location:
+#                         call['url'] = url.format(lat=user_location['lat'], lon=user_location['lon'])
+#                         print(f"✅ Filled location in URL: {call['url'][:100]}...")
+#                     elif '{lat}' in url or '{lon}' in url:
+#                         print(f"⚠️ Skipping API call - needs location but none provided")
+#                         call['url'] = ''
+                
+#                 # Execute API calls
+#                 valid_calls = [c for c in api_calls if c.get('url')]
+#                 print(f"🚀 Executing {len(valid_calls)} valid API calls...")
+#                 api_results = execute_api_calls(valid_calls)
+#                 print(f"✅ API calls executed. Sources: {api_results.get('sources', [])}")
+                
+#                 # Step 3: Get final response with API data
+#                 print("🔄 Step 3: Getting final LLM response with API data...")
+#                 final_response = await asyncio.to_thread(
+#                     agent_rag_chain.invoke,
+#                     {
+#                         "input": body.question,
+#                         "farmer_profile": farmer_profile,
+#                         "session_context": session_ctx_json,
+#                         "location_info": loc_str,
+#                         "api_results": format_api_results_for_llm(api_results)
+#                     }
+#                 )
+                
+#                 answer_text = extract_answer(final_response)
+#                 sources = api_results.get("sources", [])
+#                 print(f"🎯 Final answer with API data: {answer_text[:200]}...")
+                
+#             else:
+#                 print("⚠️ No API calls were made by the LLM")
+#                 answer_text = initial_answer
+#                 sources = []
+            
+#         else:
+#             print("📚 REGULAR RAG MODE")
+#             # Regular RAG mode
+#             response = await asyncio.to_thread(
+#                 rag_chain_default.invoke,
+#                 {
+#                     "input": body.question,
+#                     "farmer_profile": farmer_profile,
+#                     "session_context": session_ctx_json,
+#                     "location_info": loc_str
+#                 }
+#             )
+#             answer_text = extract_answer(response)
+#             sources = []
+
+#     except Exception as e:
+#         print(f"❌ LLM processing error: {str(e)}")
+#         print(f"❌ Error type: {type(e).__name__}")
+#         import traceback
+#         traceback.print_exc()
+#         raise HTTPException(status_code=500, detail=f"LLM processing failed: {str(e)}")
+
+#     # Fallback logic
+#     if not answer_text.strip():
+#         print("⚠️ Empty answer, using fallback")
+#         if 'response' in locals():
+#             session_data_candidate = safe_parse_session_update(str(response))
+#         else:
+#             session_data_candidate = {}
+            
+#         if session_data_candidate:
+#             answer_text = "Noted. I've saved these details. How else can I help?"
+#         else:
+#             answer_text = (
+#                 "I could not find specific references right now. "
+#                 "I can still help with best-practice guidance. "
+#                 "Please share crop, growth stage, soil type, and irrigation method if available."
+#             )
+
+#     # Session update logic
+#     new_ctx = safe_parse_session_update(answer_text)
+#     if not new_ctx and 'response' in locals():
+#         new_ctx = safe_parse_session_update(str(response))
+
+#     if session_id and new_ctx:
+#         await update_session_context(db, session_id, new_ctx)
+
+#     # Prepare response
+#     response_data = {
+#         "answer": answer_text, 
+#         "session_id": session_id
+#     }
+    
+#     if body.enable_agent and 'sources' in locals() and sources:
+#         response_data["sources"] = sources
+#         response_data["agent_mode"] = True
+
+#     print(f"✅ AGENT RESPONSE: {json.dumps(response_data, indent=2)}")
+#     return JSONResponse(content=response_data)
+
+
+

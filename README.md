@@ -6,7 +6,6 @@ conda activate euron-bot
 conda deactivate
 pip install -r requirments.txt
 
-
 (hackx6.0) PS C:\Users\renua\OneDrive\Desktop\Hackx-6.0\euron-bot> devtunnel port create my-fastapi-tunnel-2 -p 8080 --protocol http
 Tunnel ID             : my-fastapi-tunnel-2.inc1
 Port Number           : 8080
@@ -66,3 +65,8 @@ redis-cli
 > ping
 hu
 PONG
+
+
+
+conda env create -f environment.yml -n capitalone
+conda env create -f environment.yml -n capitalone

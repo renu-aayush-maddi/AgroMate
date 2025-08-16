@@ -574,3 +574,6 @@ async def dynamic_web_extraction(url: str, questions: List[str]) -> List[str]:
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"[DYNAMIC EXTRACTION ERROR] {str(e)}")
+    
+    
+    

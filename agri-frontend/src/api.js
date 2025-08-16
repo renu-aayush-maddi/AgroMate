@@ -1,3 +1,4 @@
+// src/shared/api.js
 import axios from 'axios'
 
 export const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8080'
@@ -13,4 +14,14 @@ export function buildClient(token, sessionId) {
     return config
   })
   return client
+}
+
+export async function getOrCreateProfile(client) {
+  const { data } = await client.post('/me', {})
+  return data
+}
+
+export async function updateProfile(client, payload) {
+  const { data } = await client.post('/me', payload)
+  return data
 }

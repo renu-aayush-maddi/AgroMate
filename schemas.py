@@ -30,3 +30,10 @@ class QuestionRequest(BaseModel):
     question: str
     location: Optional[Dict[str, Any]] = None
     session_id: Optional[str] = None
+    
+
+class AgentQuestionRequest(BaseModel):
+    question: str
+    session_id: Optional[str] = None
+    location: Optional[Dict[str, Any]] = None
+    enable_agent: bool = True  # Flag to enable agent mode
