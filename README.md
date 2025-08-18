@@ -70,3 +70,21 @@ PONG
 
 conda env create -f environment.yml -n capitalone
 conda env create -f environment.yml -n capitalone
+
+
+﻿fastapi==0.116.1
+uvicorn==0.35.0
+python-dotenv==1.0.1
+pymongo==4.11.3
+requests==2.32.3
+pydantic==2.11.7
+langchain==0.3.27
+langchain-core==0.3.72
+langchain-pinecone==0.2.11
+langchain-openai==0.3.28
+langchain-google-genai==2.0.9
+pinecone==7.3.0
+motor==3.7.1
+email_validator==2.2.0
+PyJWT==2.10.1
+bcrypt==4.3.0
