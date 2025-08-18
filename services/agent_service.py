@@ -134,13 +134,14 @@ from typing import Dict, Any, Optional, List
 from urllib.parse import urlparse
 from services.dynamic_api_tool import dynamic_api_call
 
+
 # Define your fallback (default) working APIs
 DEFAULT_WORKING_APIS = {
     "weather": {
         "open_meteo": "https://api.open-meteo.com/v1/forecast?latitude={{lat}}&longitude={{lon}}&current_weather=true&hourly=temperature_2m,precipitation&daily=temperature_2m_max,temperature_2m_min,precipitation_sum&forecast_days=7"
     },
     "soil": {
-        "soilgrids": "https://rest.soilgrids.org/soilgrids/v2.0/properties/query?lon={{lon}}&lat={{lat}}&property=phh2o&property=soc&depth=0-5cm&value=mean"
+        "soilgrids": "https://rest.isric.org/soilgrids/v2.0/properties/query?lon={{lon}}&lat={{lat}}&property=phh2o&property=soc"
     },
     "location": {
         "nominatim": "https://nominatim.openstreetmap.org/reverse?format=json&lat={{lat}}&lon={{lon}}"
@@ -152,21 +153,29 @@ You are an intelligent agricultural advisor with access to real-time data throug
 
 RELIABLE APIs YOU CAN USE:
 Weather (Open-Meteo): https://api.open-meteo.com/v1/forecast?latitude={{lat}}&longitude={{lon}}&current_weather=true&hourly=temperature_2m,precipitation&daily=temperature_2m_max,temperature_2m_min,precipitation_sum&forecast_days=7
-Soil (SoilGrids): https://rest.soilgrids.org/soilgrids/v2.0/properties/query?lon={{lon}}&lat={{lat}}&property=phh2o&property=soc&depth=0-5cm&value=mean
+Soil (SoilGrids): https://rest.isric.org/soilgrids/v2.0/properties/query?lon={{lon}}&lat={{lat}}&property=phh2o&property=soc
 Location (Nominatim): https://nominatim.openstreetmap.org/reverse?format=json&lat={{lat}}&lon={{lon}}
-
+market(agmarknet):https://api.data.gov.in/resource/9ef84268-d588-465a-a308-a864a43d0070?api-key=579b464db66ec23bdd000001bb4b9686991d47e05a78b504d33fd430&format=json&filters[state]=&filters[commodity]=
 INSTRUCTIONS:
 1. For weather/irrigation questions, use the weather API above
 2. For soil questions, use the soil API above
 3. For location-based queries, use the location API above
-4. You may construct OTHER valid API URLs if you know reliable endpoints
-5. Always replace {{lat}} and {{lon}} with actual coordinates from user location
+4. For market price queries, use the Agmarknet API:
+   - Extract 'state' and 'commodity' from the user's message or session context.
+   - If either is missing, ask a concise follow-up to get the missing value(s).
+   - Use the exact casing the API expects (e.g., 'Maharashtra', 'Tomato').
+5. You may construct OTHER valid API URLs if you know reliable endpoints
+6. Always replace {{lat}} and {{lon}} with actual coordinates from user location
 
 API_CALL FORMAT:
 API_CALL: {{"url": "complete_valid_url", "description": "what_this_fetches"}}
 
 Generate REAL API URLs, not placeholders. Use the examples above as templates.
 """
+
+
+
+
 
 def create_agent_prompt(base_prompt: str) -> str:
     """Enhance existing prompt with agent capabilities"""

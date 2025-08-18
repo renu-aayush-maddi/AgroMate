@@ -307,8 +307,14 @@ prompt_default = ChatPromptTemplate.from_messages([
      "Always include a normal answer; optionally include a single-line JSON after 'SESSION_UPDATE:' to persist context."),
     ("human", "{input}\n\nFarmer Profile: {farmer_profile}\nSession Context: {session_context}\nAdditional Info: {location_info}")
 ])
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-llm_router = ChatOpenAI(openai_api_key=OPENAI_API_KEY, model="gpt-4o-mini")
+# llm_router = ChatOpenAI(openai_api_key=OPENAI_API_KEY, model="gpt-4o-mini")
+llm_router = ChatOpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=OPENROUTER_API_KEY,
+    model="qwen/qwen-2.5-72b-instruct:free"
+)
 qa_chain_default = create_stuff_documents_chain(llm_router, prompt_default)
 rag_chain_default = create_retrieval_chain(retriever_default, qa_chain_default)
 
