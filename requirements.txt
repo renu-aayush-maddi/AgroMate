@@ -12,6 +12,7 @@ langchain-google-genai==2.0.9
 pinecone==7.3.0
 motor==3.7.1
 email_validator==2.2.0
+PyJWT==2.10.1
 
 
 
@@ -319,5 +320,6 @@ email_validator==2.2.0
 # yarl==1.18.3
 # zipp==3.21.0
 # zstandard==0.23.0
+
 
 
