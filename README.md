@@ -1,4 +1,22 @@
-# Hackrx 6.0
+Backend
+git clone https://github.com/renu-aayush-maddi/AgroMate
+pip install -r requirments.txt
+uvicorn main:app --host 0.0.0.0 --port 8080
+
+FRONTEND
+
+cd agri-frontend
+npm i
+npm run dev
+
+
+
+
+<!-- # Hackrx 6.0
+
+
+
+
 git clone https://github.com/renu-aayush-maddi/euron-bot.git
 cd euron-bot
 conda create -n euron-bot python=3.10 -y
@@ -87,4 +105,4 @@ pinecone==7.3.0
 motor==3.7.1
 email_validator==2.2.0
 PyJWT==2.10.1
-bcrypt==4.3.0
+bcrypt==4.3.0 -->
