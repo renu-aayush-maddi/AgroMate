@@ -297,3 +297,11 @@ def format_api_results_for_llm(api_results: Dict[str, Any]) -> str:
         else:
             formatted += f"{result.get('description', call_name)}: FAILED - {result.get('error', 'Unknown error')}\n"
     return formatted
+
+def remove_internal_lines(answer: str) -> str:
+    return '\n'.join([
+        line for line in answer.split('\n')
+        if not line.strip().startswith('API_CALL:')
+        and not line.strip().startswith('SESSION_UPDATE:')
+        and line.strip() != ""
+    ])

@@ -252,9 +252,11 @@ from db_mongo import get_db, close_db
 from models_mongo import USERS_COLL, PROFILES_COLL, SESSIONS_COLL, user_doc, profile_doc, session_context_doc
 from schemas import SignupRequest, LoginRequest, TokenResponse, FarmerProfileRequest, FarmerProfileResponse, QuestionRequest
 from auth import hash_password, verify_password, create_access_token, get_current_user
-from services.agent_service import create_agent_prompt, extract_api_calls, execute_api_calls, format_api_results_for_llm
+from services.agent_service import create_agent_prompt, extract_api_calls, execute_api_calls, format_api_results_for_llm,remove_internal_lines
 from services.dynamic_api_tool import dynamic_api_call
 from schemas import AgentQuestionRequest  # Add to your existing schema imports
+
+
 
 # LangChain / RAG
 from langchain_google_genai import GoogleGenerativeAI
@@ -309,12 +311,12 @@ prompt_default = ChatPromptTemplate.from_messages([
 ])
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-# llm_router = ChatOpenAI(openai_api_key=OPENAI_API_KEY, model="gpt-4o-mini")
-llm_router = ChatOpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key=OPENROUTER_API_KEY,
-    model="qwen/qwen-2.5-72b-instruct:free"
-)
+llm_router = ChatOpenAI(openai_api_key=OPENAI_API_KEY, model="gpt-4o-mini")
+# llm_router = ChatOpenAI(
+#     base_url="https://openrouter.ai/api/v1",
+#     api_key=OPENROUTER_API_KEY,
+#     model="qwen/qwen-2.5-72b-instruct:free"
+# )
 qa_chain_default = create_stuff_documents_chain(llm_router, prompt_default)
 rag_chain_default = create_retrieval_chain(retriever_default, qa_chain_default)
 
@@ -895,6 +897,7 @@ async def run_agent_query(body: AgentQuestionRequest, request: Request, db=Depen
                         }
                     )
                     answer_text = extract_answer(final_response)
+                    answer_text = remove_internal_lines(answer_text)
                     sources = api_results.get("sources", [])
                     print(f"🎯 Final answer with API data: {answer_text[:200]}...")
                 else:
